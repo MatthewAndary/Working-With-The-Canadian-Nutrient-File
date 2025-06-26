@@ -1,0 +1,657 @@
+---
+title: "Working Segmentation Analysis"
+author: "Matthew"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    tufte::tufte_handout: default
+    tufte::tufte_html: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+ggplot2::theme_set(ggplot2::theme_minimal())
+
+pacman::p_load(
+  AER,
+  tidyverse,
+  dplyr,
+  quantmod,
+  MASS,
+  dplyr,
+  kableExtra,
+  modelsummary,
+  ggplot2,
+  stats,
+  data.table,
+  ghibli,
+  combinat,
+  tseries,
+  knitr,
+  psych,
+  dyn,
+  dynlm,
+  xlsx,
+  testcorr,
+  sarima,
+  ggpubr
+)
+```
+
+# Overview
+
+Our initial goal for this project was to get acquainted with segmentation techniques (mainly K-means clustering). Our results below show that we are able to cluster foods from The Canadian Nutrient File into rankings ordered by their macro-nutrients (Protein, Carbohydrates, Fatty Acids). 
+
+Given our results, this project can grow to incorprate external data sources. 
+
+Currently this all that is completed. 
+
+Our next steps are to link this data to the CPI. possibly price macro-nutrients. 
+
+```{r, echo = F}
+readRenviron("~/.Renviron")
+cnf_path <- Sys.getenv("CNF_DATA")
+food_group <- read.csv(file.path(cnf_path, "FOOD GROUP.CSV"))
+food_name <- read.csv(file.path(cnf_path, "FOOD NAME.CSV"))
+food_source <- read.csv(file.path(cnf_path, "FOOD SOURCE.CSV"))
+
+nutrient_amount <- read.csv(file.path(cnf_path, "NUTRIENT AMOUNT.CSV"))
+nutrient_name <- read.csv(file.path(cnf_path, "NUTRIENT NAME.CSV"))
+nutrient_source <- read.csv(file.path(cnf_path, "NUTRIENT SOURCE.CSV"))
+
+refuse_amount <- read.csv(file.path(cnf_path, "REFUSE AMOUNT.CSV"))
+refuse_name <- read.csv(file.path(cnf_path, "REFUSE NAME.CSV"))
+
+yield_amount <- read.csv(file.path(cnf_path, "YIELD AMOUNT.CSV"))
+yield_name <- read.csv(file.path(cnf_path, "YIELD NAME.CSV"))
+
+conversion_factor <- read.csv(file.path(cnf_path, "CONVERSION FACTOR.CSV"))
+measure_name <- read.csv(file.path(cnf_path, "MEASURE NAME.CSV"))
+```
+
+# Cleaning data
+
+> In the given documentation we have a file relation chart shown [here](https://www.canada.ca/en/health-canada/services/food-nutrition/healthy-eating/nutrient-data/canadian-nutrient-file-compilation-canadian-food-composition-data-database-structure.html)
+>
+> Merging all of our datasets into one master file. would give us a hard time. so were going to follow the charts heirchery and merge our data acording to the data they contain.
+>
+> First we link the CNF "Food Group" data to the CNF "Food Name" Data
+
+```{r, results = 'hide'}
+food <- food_name
+food <- merge(food, food_group, by = c("FoodGroupID"))
+food <- food[ , !grepl("F$", names(food))]
+head(food)
+```
+
+> Next we merge this data set, with four other datasets seperately.
+>
+> These will sets be called, Yield, Nutrients, Refuse, Conversion.
+>
+> It's also important to mention that this is a bilingual data set.
+>
+> So within this step (considering i don't speak french) I will also be removing french columns.
+
+```{r, results = 'hide'}
+#Nutrients
+nutrients <- merge(nutrient_name, nutrient_amount, by = c("NutrientID"))
+nutrients <- merge(nutrients, food, by = c("FoodID"))
+nutrients <- nutrients[ , !grepl("F$", names(nutrients))]
+head(nutrients)
+
+nutrient_wide <- nutrients %>%
+  dplyr::select(FoodID, NutrientName, NutrientValue) %>%
+  pivot_wider(names_from = NutrientName, values_from = NutrientValue) %>%
+  left_join(food, by = "FoodID")  # to bring in food names/groups
+
+# Optional: remove NA or replace with 0
+# nutrient_wide[is.na(nutrient_wide)] <- 0
+
+#Yield
+yield <- merge(yield_name, yield_amount, by = c("YieldID"))
+yield <- merge(yield, food, by = c("FoodID"))
+yield <- yield[ , !grepl("F$", names(yield))]
+head(yield)
+
+
+#Refuse
+refuse <- merge(refuse_name, refuse_amount, by = c("RefuseID"))
+refuse <- merge(refuse, food, by = c("FoodID"))
+refuse <- refuse[ , !grepl("F$", names(refuse))]
+head(refuse)
+
+
+#Conversion
+conversion <- merge(measure_name, conversion_factor, by = c("MeasureID"))
+conversion <- merge(nutrients, food, by = c("FoodID"))
+conversion <- conversion[ , !grepl("F$", names(conversion))]
+head(conversion)
+```
+
+> This step here just removes our raw datasets (as we will not be using them). This cleans up our local environment.
+
+```{r}
+df_names <- c("food_group","food_name","food_source","measure_name","conversion_factor","nutrient_name","nutrient_amount","nutrient_source","refuse_amount","refuse_name","yield_amount","yield_name")
+rm(list = df_names)
+
+#Ignore
+# cnf <- cnf %>% 
+#   dplyr::select(-MeasureID, -RefuseID, -YieldID, -FoodGroupID, -NutrientID, -FoodCode, -FoodSourceID, -FoodDateOfEntry, -NutrientDateOfEntry,-ConvFactorDateOfEntry, -NumberofObservations, -YieldDateofEntry, -RefuseDateOfEntry)
+```
+
+# Preparing for K-Means Clustering.
+
+From our nutrition dataset we can look at our food entries in terms of their "nutrition profile." by grouping like-foods with one-another. foods similar in nutrition will be grouped in the same group. visa versa for those not.
+
+The following are the selected nutrients we've selected for.
+
+They've been selected for a number of reasons.
+
+1.  completeness within the dataset. see [here](https://www.canada.ca/en/health-canada/services/food-nutrition/healthy-eating/nutrient-data/canadian-nutrient-file-compilation-canadian-food-composition-data-users-guide.html#a9) for the completeness of each variable. we ommitted variables when they were found in less than 80% of the data.
+
+2.  As the dimensionality in our matrix increases, the usefulness of our results decrease. this is an inherent the geometry behind high-dimensional spheres. The likelihood of clusters forming in nice, evenly-separated spheres is basically zero, not to mention the fact that the volumes of any such sphere becomes increasingly large and hard to deal with.
+
+3.  For now let's keep our clustering simple. we'll only measure the three macro-nutrients. (protien, fat, carbs)
+
+```{r}
+nutrient_vector <- c("FoodID",
+                     "PROTEIN",
+                     "FAT (TOTAL LIPIDS)", 
+                     "CARBOHYDRATE, TOTAL (BY DIFFERENCE)"
+                     # "ENERGY (KILOCALORIES)",
+                     #"MOISTURE",
+                     # "ASH, TOTAL",
+                     # "SODIUM",
+                     # "CALCIUM",
+                     # "IRON"
+                     # "FATTY ACIDS, POLYUNSATURATED, 22:6 n-3, DOCOSAHEXAENOIC (DHA)",
+                     # "FATTY ACIDS, POLYUNSATURATED, 22:5 n-3, DOCOSAPENTAENOIC (DPA)",
+                     # "PHOSPHORUS",
+                     # "FOLIC ACID",
+                     # "POTASSIUM",
+                     #"VITAMIN C",
+                     # "CHOLESTEROL",
+                     #"MAGNESIUM",
+                     #"ZINC",
+                     #"FATTY ACIDS, SATURATED, TOTAL",
+                     # "FIBRE, TOTAL DIETARY",
+                     # "NIACIN (NICOTINIC ACID) PREFORMED",
+                     # "TOTAL NIACIN EQUIVALENT",
+                     # "RETINOL ACTIVITY EQUIVALENTS",
+                     # "RIBOFLAVIN",
+                     # "COPPER",
+                     # "THIAMIN",
+                     # "FATTY ACIDS, POLYUNSATURATED, 18:3 c,c,c n-6, g-LINOLENIC, OCTADECATRIENOIC",
+                     # "CAFFEINE",
+                     # "FATTY ACIDS, MONOUNSATURATED, TOTAL","FATTY ACIDS, POLYUNSATURATED, TOTAL",
+                     # "ALCOHOL",
+                     # "THEOBROMINE",
+                     #"VITAMIN B-12",
+                     #"VITAMIN B-6",
+                     # "TOTAL FOLACIN",
+                     # "DIETARY FOLATE EQUIVALENTS",
+                     # "RETINOL",
+                     # "NATURALLY OCCURRING FOLATE",
+                     # "FATTY ACIDS, POLYUNSATURATED, 20:3 n-3 EICOSATRIENOIC",
+                     # "FATTY ACIDS, POLYUNSATURATED, 20:3 n-6, EICOSATRIENOIC",
+                     # "FATTY ACIDS, POLYUNSATURATED, 18:2undifferentiated, LINOLEIC, OCTADECADIENOIC",
+                     # "FATTY ACIDS, MONOUNSATURATED, 18:1undifferentiated, OCTADECENOIC","MANGANESE",
+                     # "FATTY ACIDS, SATURATED, 16:0, HEXADECANOIC","FATTY ACIDS, SATURATED, 18:0, OCTADECANOIC",
+                     # "FATTY ACIDS, TRANS, TOTAL",
+                     #"BETA CAROTENE",
+                     # "FATTY ACIDS, POLYUNSATURATED, 18:3undifferentiated, LINOLENIC, OCTADECATRIENOIC",
+                     #"VITAMIN D (INTERNATIONAL UNITS)",
+                     # "SELENIUM",
+                     # "FATTY ACIDS, SATURATED, 14:0, TETRADECANOIC","FATTY ACIDS, MONOUNSATURATED, 16:1undifferentiated, HEXADECENOIC",
+                     # "PANTOTHENIC ACID","FATTY ACIDS, POLYUNSATURATED, 18:3 c,c,c n-3  LINOLENIC, OCTADECATRIENOIC","SUGARS, TOTAL"
+)
+
+#Pivot nutrients so each food is a row, each nutrient a column
+nutrient_wide_clean <- nutrient_wide %>% 
+  dplyr::select(nutrient_vector)
+
+# Scale for clustering
+nutrient_matrix <- nutrient_wide_clean %>%
+  dplyr::select(where(is.numeric)) %>%
+  dplyr::select(-FoodID) %>%
+  scale()
+
+colnames(nutrient_matrix)
+
+
+anyNA(nutrient_matrix) # TRUE means there's at least one NA
+any(is.infinite(nutrient_matrix))  # TRUE means there's Inf or -Inf
+
+
+nutrient_matrix_clean <- nutrient_matrix[complete.cases(nutrient_matrix), ]
+
+dim(nutrient_matrix)         # Original size
+dim(nutrient_matrix_clean)   # After removing NAs
+
+
+# This allows us to preserve which rows we removed from our data set. this will come in handy later when we add our clusters back to the principal data. 
+row_mask <- complete.cases(nutrient_matrix)
+nutrient_wide_final <- nutrient_wide_clean[row_mask, ]
+```
+
+# Our Naive Clustering.
+
+Here we run our 3 clusters as a naive test to see what happens.
+
+```{r}
+# K-means clustering
+set.seed(5)
+k_clusters <- kmeans(nutrient_matrix_clean, centers = 3)
+
+# Add cluster back to data
+nutrient_wide_final$Cluster <- factor(k_clusters$cluster)
+
+# PCA visualization
+pca <- prcomp(nutrient_matrix_clean)
+pca_df <- as.data.frame(prcomp(nutrient_matrix_clean)$x)
+pca_df$Cluster <- nutrient_wide_final$Cluster
+
+```
+
+This graph can be simply interpreted as.
+
+> Each point = one food.
+
+> Foods close together = similar nutrient profiles.
+
+> Foods far apart = nutritionally different.
+
+> PC1 (x-axis) explains the most variance; PC2 the second most.
+
+> The direction and spread of clusters show how different combinations of nutrients separate the foods.
+
+```{r}
+ggplot(pca_df, aes(PC1, PC2, color = Cluster)) +
+  geom_point(alpha = 0.6) +
+  theme_minimal() +
+  labs(title = "Food Cluster Visualization (PCA)",
+       x = "Principal Component 1",
+       y = "Principal Component 2")
+
+```
+
+# Elbow graph for finding optimal K
+
+```{r}
+# We'll try k from 1 to 10
+wss <- numeric(10)
+
+set.seed(42)
+for (k in 1:10) {
+  kmeans_model <- kmeans(nutrient_matrix_clean, centers = k, nstart = 25)
+  wss[k] <- kmeans_model$tot.withinss
+}
+
+# Create elbow plot
+elbow_df <- data.frame(Clusters = 1:10, WSS = wss)
+
+library(ggplot2)
+ggplot(elbow_df, aes(x = Clusters, y = WSS)) +
+  geom_line(color = "steelblue", linewidth = 1) +
+  geom_point(size = 2) +
+  theme_minimal() +
+  labs(title = "Elbow Method for Optimal K",
+       x = "Number of Clusters (k)",
+       y = "Total Within-Cluster Sum of Squares (WSS)")
+
+```
+
+Our elbow graph seems to point to an optimal k at around 3 to 4. let's run another test to see if it's consistent.
+
+```{r}
+library(cluster)
+
+sil_width <- numeric(9)  # k from 2 to 10
+
+set.seed(450)
+for (k in 2:10) {
+  km_res <- kmeans(nutrient_matrix_clean, centers = k, nstart = 25)
+  ss <- silhouette(km_res$cluster, dist(nutrient_matrix_clean))
+  sil_width[k - 1] <- mean(ss[, 3])  # column 3 = silhouette width
+}
+
+# Plot silhouette scores
+sil_df <- data.frame(Clusters = 2:10, Silhouette = sil_width)
+
+library(ggplot2)
+ggplot(sil_df, aes(x = Clusters, y = Silhouette)) +
+  geom_line(color = "darkgreen", linewidth = 1) +
+  geom_point(size = 2) +
+  theme_minimal() +
+  labs(title = "Average Silhouette Width for K",
+       x = "Number of Clusters (k)",
+       y = "Average Silhouette Score")
+
+```
+
+Here we will decide our optimal k by which one maximizes our silhouette score. k = (4,5,6) all seem like valid options.
+
+# A Less Naive Clustering.
+
+```{r}
+# K-means clustering
+## set.seed(5)
+set.seed(750)
+k_clusters <- kmeans(nutrient_matrix_clean, centers = 6)
+
+# Add cluster back to data
+nutrient_wide_final$Cluster <- factor(k_clusters$cluster)
+
+# PCA visualization
+pca <- prcomp(nutrient_matrix_clean)
+pca_df <- as.data.frame(prcomp(nutrient_matrix_clean)$x)
+pca_df$Cluster <- nutrient_wide_final$Cluster
+
+
+
+ggplot(pca_df, aes(PC1, PC2, color = Cluster)) +
+  geom_point(alpha = 0.6) +
+  theme_minimal() +
+  labs(title = "Food Cluster Visualization (PCA)",
+       x = "Principal Component 1",
+       y = "Principal Component 2")
+```
+
+# Signifigance of estimated clusters
+
+```{r}
+# Identify nutrient columns (excluding ID or non-numeric vars)
+nutrient_cols <- nutrient_wide_final %>%
+  dplyr::select(where(is.numeric)) %>%
+  dplyr::select(-FoodID) %>%
+  colnames()
+
+# Run ANOVA for each nutrient
+anova_results <- lapply(nutrient_cols, function(col) {
+  formula <- as.formula(paste("`", col, "` ~ Cluster", sep = ""))
+  fit <- aov(formula, data = nutrient_wide_final)
+  summary(fit)[[1]][["Pr(>F)"]][1]  # extract p-value
+})
+
+# Combine results into a data frame
+f_test_df <- data.frame(
+  Nutrient = nutrient_cols,
+  P_Value = unlist(anova_results)
+)
+
+# Optional: add significance stars
+f_test_df <- f_test_df %>%
+  mutate(Significant = case_when(
+    P_Value < 0.001 ~ "***",
+    P_Value < 0.01  ~ "**",
+    P_Value < 0.05  ~ "*",
+    TRUE ~ ""
+  )) %>%
+  arrange(P_Value)
+
+print(f_test_df)
+
+
+```
+
+# Visualizing The Difference in Nutrition.
+
+Here we visualize which nutrients were selected in each cluster. From our second graph we can tell how well each nutrient was selected for. I've also gone ahead and put the anova statistics within the graph
+
+Here we can see the composition of each cluster by their respective nutrients. This box plot makes the most sense when comparing a cluster across facets.
+
+For instance, let's draw attention to cluster 1 (in red)
+
+> The first facet shows the average carbohydrate ammount in 100g's for each cluster. We can see that within the first cluster, it contains very litte food with high carbohydrate nutrients. 
+
+> Moving onto facet 2, we see that this cluster's foods has a low amounts of fats. 
+
+> Moving onto facet three, we see that this cluster contains foods high in protien content.
+
+
+
+```{r}
+
+nutrient_wide_final %>% 
+  group_by(Cluster) %>%
+  summarise(across(where(is.numeric), ~ round(mean(.x, na.rm = TRUE), 2))) %>%
+  arrange(Cluster)
+
+top_nutrients <- c("PROTEIN", "FAT (TOTAL LIPIDS)", "CARBOHYDRATE, TOTAL (BY DIFFERENCE)")
+
+# Run ANOVA for each top nutrient
+p_vals <- lapply(top_nutrients, function(nutrient) {
+  formula <- as.formula(paste0("`", nutrient, "` ~ Cluster"))
+  fit <- aov(formula, data = nutrient_wide_final)
+  summary(fit)[[1]][["Pr(>F)"]][1]
+})
+
+# Convert to data frame
+annot_df <- data.frame(
+  Nutrient = top_nutrients,
+  p_val = formatC(unlist(p_vals), format = "e", digits = 2)
+)
+
+
+# Optional: format label string
+annot_df$label <- paste0("ANOVA p = ", annot_df$p_val)
+
+# Prepare long data for plotting
+plot_data <- nutrient_wide_final %>%
+  pivot_longer(cols = all_of(top_nutrients), names_to = "Nutrient", values_to = "Value")
+
+# Choose appropriate y-position (adjust if needed)
+label_y_pos <- plot_data %>%
+  group_by(Nutrient) %>%
+  summarise(y = max(Value, na.rm = TRUE) * 1.05)
+
+annot_df <- annot_df %>%
+  left_join(label_y_pos, by = "Nutrient")
+
+# Final plot
+ggplot(plot_data, aes(x = Cluster, y = Value, fill = Cluster)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+  facet_wrap(~ Nutrient, scales = "free_y") +
+  geom_text(data = annot_df, aes(x = 1, y = y, label = label), 
+            inherit.aes = FALSE, hjust = 0, size = 3.5) +
+  theme_minimal() +
+  labs(title = "Top Nutrients by Cluster",
+       y = "Nutrient Amount (per 100g)", x = "Cluster") +
+  theme(legend.position = "right")
+
+
+
+```
+
+These graph serves to explain why our clustering for high carbohydrate and high fat foods was in orders of magnitude higher than selecting for other macro nutrients.
+
+
+```{r}
+macro_avgs <- nutrient_wide_final %>%
+  summarise(
+    Protein = mean(`PROTEIN`, na.rm = TRUE),
+    Carbohydrates = mean(`CARBOHYDRATE, TOTAL (BY DIFFERENCE)`, na.rm = TRUE),
+    Fat = mean(`FAT (TOTAL LIPIDS)`, na.rm = TRUE)
+  ) %>%
+  pivot_longer(cols = everything(), names_to = "Macronutrient", values_to = "Average")
+
+
+ggplot(macro_avgs, aes(x = Macronutrient, y = Average, fill = Macronutrient)) +
+  geom_col(width = 0.6, alpha = 0.6) +
+  theme_minimal() +
+  scale_fill_manual(values = c(
+    "Carbohydrates" = "red",
+    "Fat" = "green",
+    "Protein" = "blue"
+  )) +
+  labs(title = "Average Macronutrient Content Across All Foods",
+       y = "Average Amount (g per 100g)", x = NULL) +
+  theme(legend.position = "none")
+
+###
+
+nutrient_means_by_cluster <- nutrient_wide_final %>%
+  dplyr::select(-FoodID) %>% 
+  group_by(Cluster) %>%
+  summarise(across(where(is.numeric), ~ round(mean(.x, na.rm = TRUE), 2))) %>%
+  arrange(Cluster)
+
+
+
+
+########################################################################
+
+
+library(tidyr)
+library(ggplot2)
+
+# Prepare long format data from nutrient_wide_final
+macro_dist <- nutrient_wide_final %>%
+  dplyr::select(`PROTEIN`, `CARBOHYDRATE, TOTAL (BY DIFFERENCE)`, `FAT (TOTAL LIPIDS)`) %>%
+  rename(
+    Protein = `PROTEIN`,
+    Carbohydrates = `CARBOHYDRATE, TOTAL (BY DIFFERENCE)`,
+    Fat = `FAT (TOTAL LIPIDS)`
+  ) %>%
+  pivot_longer(cols = everything(), names_to = "Macronutrient", values_to = "Amount")
+
+# Violin plot
+ggplot(macro_dist, aes(x = Macronutrient, y = Amount, fill = Macronutrient)) +
+  geom_violin(alpha = 0.8, trim = FALSE) +
+  geom_boxplot(width = 0.1, outlier.shape = NA, alpha = 0.5) +
+  scale_fill_manual(values = c(
+    "Protein" = "#1f78b4",
+    "Carbohydrates" = "#33a02c",
+    "Fat" = "#e31a1c"
+  )) +
+  theme_minimal() +
+  labs(title = "Distribution of Macronutrients Across All Foods",
+       y = "Amount (g per 100g)", x = NULL) +
+  theme(legend.position = "none")
+
+```
+
+# Immediate Next Steps (Analysis & Interpretation)
+
+    Label/Describe Clusters Meaningfully
+    Use nutrient averages (already computed) to give each cluster a descriptive label:
+
+        e.g., "High-Protein, Low-Fat Foods", "Carb-Dense Processed Foods", etc.
+
+    Add Cluster Counts & Food Examples
+
+        Create a table showing number of foods per cluster
+
+        Include top 3–5 example foods (e.g., by frequency or nutrient levels) per cluster
+
+    Radar Chart for Cluster Profiles
+
+        Visualize average nutrient profiles per cluster using radar/spider plots
+
+    Explore Micronutrients
+
+        Run a second round of clustering or PCA using key micronutrients (e.g., Iron, Calcium, Sodium, Vitamin C)
+
+        Compare cluster behavior when switching nutrient focus
+
+    Profile Food Groups Across Clusters
+
+        Tabulate or visualize how CNF’s “FoodGroup” categories (e.g., Vegetables, Meats) are distributed across clusters
+
+Visualization Enhancements
+
+    Heatmap of Nutrient Averages by Cluster
+
+        Cluster rows and/or nutrients visually
+
+        Make nutrient-level comparisons across clusters easy
+
+    Silhouette Plot per Food
+
+        Plot silhouette values per food (bar/line), highlighting poorly clustered cases
+
+    Parallel Coordinates Plot
+
+        Allows users to track multiple nutrient values per food across clusters (good for web dashboards)
+
+Statistical & Machine Learning Extensions
+
+    Compare K-Means with Hierarchical Clustering or DBSCAN
+
+        Useful for checking whether a different clustering algorithm yields better structure (esp. for irregular cluster shapes)
+
+    Build a Simple Classifier (Optional)
+
+    Try classifying foods into clusters using decision trees or random forests
+
+    Helps understand decision boundaries and important nutrients
+
+Communication & Write-Up
+
+    Add an Executive Summary Section
+
+    3–5 bullet points summarizing what you did, your key findings, and how it could inform health/nutrition decisions
+
+    Make Recommendations
+
+    Based on cluster profiles: e.g., “Cluster 4 contains high-sodium, low-fiber foods — consumers may benefit from moderation”
+
+    Add a Limitations Section
+
+    Expand on your current “Drawbacks”:
+
+        Cluster shapes
+
+        Exclusion of foods with missing data
+
+        Possible biases in the CNF dataset
+
+        Effects of scaling on interpretation
+
+    Include a Glossary or Variable Dictionary (Appendix)
+
+    Briefly explain what each nutrient means, especially if presenting to non-technical readers
+
+Polish and Portfolio-Ready
+
+    Publish as a GitHub README / Quarto Doc / RMarkdown Site
+
+    Add interactive elements (e.g., DT::datatable, leaflet for geographic food origins if available)
+
+    Export Final Dataset
+
+    Include a CSV of foods with assigned clusters and key nutrient values for sharing or further analysis
+
+    Optional: Add an Interactive Shiny App
+
+    Let users select a food and see where it falls in the PCA space or cluster assignment
+
+Less immediate long steps.
+
+Incorporate External Data Sources
+Why? To enrich context, increase real-world relevance, or link to behavior/policy.
+
+    Link with price data (e.g., grocery store APIs or Statistics Canada’s food CPI)
+
+        Compare nutritional value per dollar
+
+        Cluster based on nutrient density and affordability
+
+    Add environmental impact data
+
+        Carbon emissions, land use, water usage of food categories (e.g., from Our World in Data, FAO)
+
+        Explore trade-offs between nutrition and sustainability
+
+    Link to health outcomes
+
+        Pull dietary intake data from CCHS-Nutrition or NHANES (US) and estimate how common these foods are in real diets
+
+        Hypothesize relationships between food clusters and population health issues (e.g., sodium and hypertension)
+# Drawbacks.
+
+1.  Sensitive to seed selection.
+2.  
+3.  
+4.  
