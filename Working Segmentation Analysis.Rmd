@@ -464,7 +464,7 @@ ggplot(plot_data, aes(x = Cluster, y = Value, fill = Cluster)) +
 
 ```
 
-These graph serves to explain why our clustering for high carbohydrate and high fat foods was in orders of magnitude higher than selecting for other macro nutrients.
+
 
 
 ```{r}
@@ -503,9 +503,6 @@ nutrient_means_by_cluster <- nutrient_wide_final %>%
 ########################################################################
 
 
-library(tidyr)
-library(ggplot2)
-
 # Prepare long format data from nutrient_wide_final
 macro_dist <- nutrient_wide_final %>%
   dplyr::select(`PROTEIN`, `CARBOHYDRATE, TOTAL (BY DIFFERENCE)`, `FAT (TOTAL LIPIDS)`) %>%
@@ -531,6 +528,104 @@ ggplot(macro_dist, aes(x = Macronutrient, y = Amount, fill = Macronutrient)) +
   theme(legend.position = "none")
 
 ```
+
+
+
+# Label/Describe Clusters Meaningfully
+This part of the project is one of the more important steps. 
+
+Our goal here is to name and label our clusters so they're interpretable.
+
+From our 6 clusters created earlier, we can rank our food in terms of their macro-nutrient composition.
+
+    Very High-Carbs, Very High-Protien, Very High-Fat.
+    High-Carbs, High-Protien, High-Fat.
+    Moderate-Carbs,...
+    Sufficent-Carbs,...
+    Low-Carbs,...
+    Very-Low,...
+
+```{r}
+# Here we have the means for each macro nutrient from each of our 6 clusters.
+cluster_summary <- nutrient_wide_final %>%
+  group_by(Cluster) %>%
+  summarise(
+    Protein = mean(`PROTEIN`, na.rm = TRUE),
+    Carbohydrates = mean(`CARBOHYDRATE, TOTAL (BY DIFFERENCE)`, na.rm = TRUE),
+    Fat = mean(`FAT (TOTAL LIPIDS)`, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+head(cluster_summary)
+
+# The centroids of our k-means clusters are "Non-parametric".
+# If we would have clustered according to the shape of our distribution, we would already have them named and, hence, interpretable. 
+
+# So we will take an ordered approach to our clusters.
+# i.e. the cluster with the highest mean protein will be labelled as "Very High"
+  # The second highest cluster in protein will be labelled "High". etc 
+  # The same follows for carbs and fats. 
+
+
+# Note we will have an overlap problem.
+# i.e. foods high in fats and protein (i.e. new york striploin.)
+# Therefor we want 3 columns. 1 for each macro nutrients. 
+# each column will contain one of the 6 rankings. 
+
+
+cluster_means <- cluster_summary %>%
+  mutate(
+    Protein_Rank = rank(-Protein, ties.method = "min"),  # descending (higher = better)
+    Carb_Rank = rank(-Carbohydrates, ties.method = "min"),
+    Fat_Rank = rank(-Fat, ties.method = "min")
+  )
+
+
+
+rank_labels <- c("Very High", "High", "Moderate", "Sufficient", "Low", "Very Low")
+
+cluster_means <- cluster_means %>%
+  mutate(
+    Protein_Label = rank_labels[Protein_Rank],
+    Carb_Label = rank_labels[Carb_Rank],
+    Fat_Label = rank_labels[Fat_Rank]
+  )
+
+head(cluster_means)
+# From this we have an immediate issue.
+# Clusters 3,2, and 5 suffer from "non-uniqueness". 
+  # Where one cluster shows the same level of nutrients for two or more macro nutrients. 
+  # i.e cluster 2 contains foods both "Sufficient" in fats and carbs,
+      # cluster 3 contains foods both "High" in fats and carbs
+      # cluster 5 contains foods both "Very Low" in protein and carbs. 
+# Let's try a different solution
+
+
+# cluster_means <- cluster_means %>%
+#   arrange(desc(Protein)) %>%
+#   mutate(Protein_Rank = dense_rank(desc(Protein))) %>%
+#   
+#   arrange(desc(Carbohydrates)) %>%
+#   mutate(Carb_Rank = dense_rank(desc(Carbohydrates))) %>%
+#   
+#   arrange(desc(Fat)) %>%
+#   mutate(Fat_Rank = dense_rank(desc(Fat)))
+
+# Does not change a thing.
+# We got this far with our k-means process. let's continue with a radar plot for now. 
+
+
+nutrient_wide_final <- nutrient_wide_final %>%
+  left_join(cluster_means %>% dplyr::select(Cluster, Protein_Label, Carb_Label, Fat_Label), by = "Cluster")
+
+
+```
+# The right tool for the right problem. 
+I'm not quite happy with the incompleteness of our rankings. 
+
+As a result of our k-means centroids being chosen randomly (it's a non parametric process) this was bound to happen. 
+
+We're abandoning the k-means process. and moving going to rank foods based off their place in within the distribution. 
 
 # Immediate Next Steps (Analysis & Interpretation)
 
