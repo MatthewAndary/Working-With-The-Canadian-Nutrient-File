@@ -2,7 +2,8 @@
 title: "Working Segmentation Analysis"
 author: "Matthew"
 date: "`r Sys.Date()`"
-output: 
+output:
+  pdf_document: default
   html_document:
     tufte::tufte_handout: default
     tufte::tufte_html: default
@@ -43,7 +44,7 @@ pacman::p_load(
 
 Our initial goal for this project was to get acquainted with segmentation techniques (mainly K-means clustering). Our results below show that we are able to cluster foods from The Canadian Nutrient File into rankings ordered by their macro-nutrients (Protein, Carbohydrates, Fatty Acids). 
 
-Given our results, this project can grow to incorprate external data sources. 
+Given our results, this project can grow to incorporate external data sources. 
 
 Currently this all that is completed. 
 
@@ -336,7 +337,6 @@ Here we will decide our optimal k by which one maximizes our silhouette score. k
 
 ```{r}
 # K-means clustering
-## set.seed(5)
 set.seed(750)
 k_clusters <- kmeans(nutrient_matrix_clean, centers = 6)
 
@@ -625,7 +625,10 @@ I'm not quite happy with the incompleteness of our rankings.
 
 As a result of our k-means centroids being chosen randomly (it's a non parametric process) this was bound to happen. 
 
-We're abandoning the k-means process. and moving going to rank foods based off their place in within the distribution. 
+We're abandoning the k-means process. and moving to ranking foods based off their place in within the distribution.
+
+From this we can identify food high in protiens, fats, carbs. 
+
 
 # Immediate Next Steps (Analysis & Interpretation)
 
@@ -682,45 +685,9 @@ Statistical & Machine Learning Extensions
 
     Helps understand decision boundaries and important nutrients
 
-Communication & Write-Up
+    Dimensionality Reduction Alternatives
 
-    Add an Executive Summary Section
-
-    3–5 bullet points summarizing what you did, your key findings, and how it could inform health/nutrition decisions
-
-    Make Recommendations
-
-    Based on cluster profiles: e.g., “Cluster 4 contains high-sodium, low-fiber foods — consumers may benefit from moderation”
-
-    Add a Limitations Section
-
-    Expand on your current “Drawbacks”:
-
-        Cluster shapes
-
-        Exclusion of foods with missing data
-
-        Possible biases in the CNF dataset
-
-        Effects of scaling on interpretation
-
-    Include a Glossary or Variable Dictionary (Appendix)
-
-    Briefly explain what each nutrient means, especially if presenting to non-technical readers
-
-Polish and Portfolio-Ready
-
-    Publish as a GitHub README / Quarto Doc / RMarkdown Site
-
-    Add interactive elements (e.g., DT::datatable, leaflet for geographic food origins if available)
-
-    Export Final Dataset
-
-    Include a CSV of foods with assigned clusters and key nutrient values for sharing or further analysis
-
-    Optional: Add an Interactive Shiny App
-
-    Let users select a food and see where it falls in the PCA space or cluster assignment
+        Explore t-SNE or UMAP for visualizing high-dimensional nutrient data
 
 Less immediate long steps.
 
@@ -744,9 +711,8 @@ Why? To enrich context, increase real-world relevance, or link to behavior/polic
         Pull dietary intake data from CCHS-Nutrition or NHANES (US) and estimate how common these foods are in real diets
 
         Hypothesize relationships between food clusters and population health issues (e.g., sodium and hypertension)
-# Drawbacks.
 
+# Drawbacks to K-means clustering.
 1.  Sensitive to seed selection.
-2.  
-3.  
-4.  
+2.  Non-parametric estimation is incredibly useful for prediction. not so much explanation. (which is what were attempting to do right now)
+3. interpretability of clusters is difficult when the centroids are not aligned with the underlying distribution of the data.
